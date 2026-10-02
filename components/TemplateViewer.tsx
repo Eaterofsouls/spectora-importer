@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useTransition } from 'react';
+import { sanitiseHtml } from '@/lib/sanitise';
 
 interface Field {
   id: string;
@@ -169,7 +170,15 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
             )}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          <a
+            href={`/api/templates/${templateId}/export`}
+            download
+            className="px-3.5 py-2 text-sm font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors inline-flex items-center gap-1.5 shadow-sm"
+            title="Download full 42-column Spectora spreadsheet export with any edits applied"
+          >
+            <span>📥</span> Export (.xlsx)
+          </a>
           {isSeed ? (
             <button
               onClick={duplicateTemplate}
@@ -289,7 +298,7 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
                             {!isEditing && field.comment_text && (
                               <div
                                 className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed mt-1 prose prose-sm dark:prose-invert max-w-none"
-                                dangerouslySetInnerHTML={{ __html: field.comment_text }}
+                                dangerouslySetInnerHTML={{ __html: sanitiseHtml(field.comment_text) }}
                               />
                             )}
                             {!isEditing && !field.comment_text && (
@@ -317,7 +326,7 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
                                     <label className="text-xs text-gray-500 dark:text-gray-400 mb-1 block">Rendered preview</label>
                                     <div
                                       className="h-32 overflow-auto p-2 border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-700 dark:text-gray-300 prose prose-sm dark:prose-invert max-w-none"
-                                      dangerouslySetInnerHTML={{ __html: editValue }}
+                                      dangerouslySetInnerHTML={{ __html: sanitiseHtml(editValue) }}
                                     />
                                   </div>
                                 </div>
