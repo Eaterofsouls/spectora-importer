@@ -12,13 +12,17 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { config } from "dotenv";
+
+// Load .env.local (tsx doesn't auto-load it)
+config({ path: path.resolve(process.cwd(), ".env.local") });
+
 import { createClient } from "@supabase/supabase-js";
 import { parseSpectoraExport } from "../lib/parser";
-import "dotenv/config";
 
 const XLS_PATH = path.resolve(
-  __dirname,
-  "../../Your Workspace here/InterNACHI Residential -2026-10-01.xls"
+  process.cwd(),
+  "InterNACHI Residential -2026-10-01.xls"
 );
 
 async function seed() {

@@ -80,7 +80,7 @@ export default function Home() {
         <div className="mt-10 text-center">
           <p className="text-sm text-gray-400 dark:text-gray-500">
             Or{' '}
-            <a href="/templates/seed" className="text-blue-500 hover:underline">
+            <a href="/templates/b1ceca61-068b-4f5e-9d66-61ff9ed784c1" className="text-blue-500 hover:underline">
               browse the pre-imported InterNACHI Residential template
             </a>{' '}
             to see what an imported template looks like.
