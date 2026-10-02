@@ -42,15 +42,41 @@ const KNOWN_SPECTORA_HEADERS = new Set([
   "Comment Type (info, limit, defect)",
   "Category (-1: Low, 0: Med, 1: High)",
   "Multiple Choice Options (comma-separated)",
+  "Unit Type Options (numeric answers only, comma-separated)",
+  "Recommendation (from list)",
   "Order (w/i item)",
   "Answer Type (boolean, checkbox, date, number, range, text)",
   "Default Value",
-  "Recommendation",
-  "Location",
-  "Unit Options",
-  "Default Unit",
-  "Photo Caption",
-  "Photo URL",
+  'Default Value 2 (for "range" types)',
+  'Default Unit Type (for "number" and "range" types)',
+  "Default Location",
+  "Default Estimate Min",
+  "Default Estimate Max",
+  "Locked",
+  "Simple Format",
+  "Disable Photos",
+  "Uses",
+  "Default Photo 1",
+  "Default Photo 1 Caption",
+  "Default Photo 2",
+  "Default Photo 2 Caption",
+  "Default Photo 3",
+  "Default Photo 3 Caption",
+  "Default Photo 4",
+  "Default Photo 4 Caption",
+  "Default Photo 5",
+  "Default Photo 5 Caption",
+  "Default Photo 6",
+  "Default Photo 6 Caption",
+  "Default Photo 7",
+  "Default Photo 7 Caption",
+  "Default Photo 8",
+  "Default Photo 8 Caption",
+  "Default Photo 9",
+  "Default Photo 9 Caption",
+  "Default Photo 10",
+  "Default Photo 10 Caption",
+  "Last Modified",
 ]);
 
 // Strict schema validator for AI response — prevents hallucinated keys from
@@ -74,7 +100,7 @@ function validateAiResponse(raw: unknown): Record<string, number> {
  * Run the AI column confidence auditor.
  *
  * @param headers - Column headers from the uploaded file
- * @param sampleRows - First 3 data rows (for AI context, no user PII)
+ * @param sampleRows - First 3 data rows (retained for signature matching)
  * @param apiKey - Optional Gemini API key (from env). If absent, AI is skipped.
  */
 export async function runColumnAudit(
@@ -101,7 +127,7 @@ export async function runColumnAudit(
     };
   }
 
-  // ── AI audit (air-gapped: only headers + sample values, no user content) ───
+  // ── AI audit (air-gapped: only header names, zero user content) ───
   const unknownHeaders = headers.filter((h) => h && !KNOWN_SPECTORA_HEADERS.has(h));
   if (unknownHeaders.length === 0) {
     // All headers are known — no need to run AI
@@ -113,25 +139,15 @@ export async function runColumnAudit(
     };
   }
 
-  // Build prompt: headers + 3 sample values only (no user comment text)
-  const sampleData = unknownHeaders.map((h) => {
-    const hIdx = headers.indexOf(h);
-    const samples = sampleRows
-      .slice(0, 3)
-      .map((r) => String(r[hIdx] ?? ""))
-      .filter(Boolean)
-      .slice(0, 3);
-    return `"${h}": samples=[${samples.map((s) => JSON.stringify(s)).join(", ")}]`;
-  });
-
+  // Build prompt: headers only (strictly air-gapped from user comment content)
   const prompt = `You are auditing a spreadsheet export from Spectora inspection software.
-The following column headers were NOT recognised by our deterministic parser.
-For each, give a confidence score 0.0-1.0 that it is a genuine Spectora export column
+The following column headers were NOT recognised by our standard column dictionary.
+For each, give a confidence score 0.0-1.0 that it is a genuine Spectora template column
 (1.0=definitely Spectora, 0.0=definitely foreign/unknown).
 Respond with ONLY a JSON object: { "header name": confidence, ... }. No other text.
 
 Unknown columns:
-${sampleData.join("\n")}`;
+${unknownHeaders.map((h) => `- "${h}"`).join("\n")}`;
 
   // Failure mode 3: Timeout (>3s)
   const controller = new AbortController();
@@ -147,7 +163,7 @@ ${sampleData.join("\n")}`;
         signal: controller.signal,
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 256 },
+          generationConfig: { temperature: 0, maxOutputTokens: 1024 },
         }),
       }
     );

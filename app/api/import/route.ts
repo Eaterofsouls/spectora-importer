@@ -110,6 +110,7 @@ export async function POST(req: NextRequest) {
       snapshot: {
         headers: parsed.headers,
         rows: parsed.snapshot_rows,
+        rows_skipped: parsed.rows_skipped,
       },
     })
     .select("id")

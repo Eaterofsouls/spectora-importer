@@ -70,6 +70,7 @@ export async function verifyTemplate(
   const snapshot = template.snapshot as {
     headers: string[];
     rows: unknown[][];
+    rows_skipped?: number;
   };
 
   // Build header→column index map
@@ -155,9 +156,12 @@ export async function verifyTemplate(
         continue;
       }
 
-      // Convert category to number string comparison if numeric
-      const sValStr = normSnapshot !== null ? String(normSnapshot) : null;
-      const dValStr = normDb !== null ? String(normDb) : null;
+      // Convert category to number string comparison if numeric and normalize HTML entities
+      const cleanEntity = (s: string | null) =>
+        s ? s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">") : null;
+
+      const sValStr = cleanEntity(normSnapshot !== null ? String(normSnapshot) : null);
+      const dValStr = cleanEntity(normDb !== null ? String(normDb) : null);
 
       if (sValStr !== dValStr) {
         mismatches.push({
@@ -175,11 +179,15 @@ export async function verifyTemplate(
     return (row as unknown[]).some((v) => v !== null && v !== undefined && v !== "");
   }).length;
 
-  if (dbFields.length !== snapshotNonEmptyRows) {
+  const expectedCount = typeof snapshot.rows_skipped === "number"
+    ? snapshotNonEmptyRows - snapshot.rows_skipped
+    : snapshotNonEmptyRows;
+
+  if (dbFields.length !== expectedCount) {
     mismatches.push({
       source_row: 0,
       field: "row_count",
-      expected: snapshotNonEmptyRows,
+      expected: expectedCount,
       got: dbFields.length,
     });
   }

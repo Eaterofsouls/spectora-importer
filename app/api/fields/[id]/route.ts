@@ -13,6 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase";
+import { sanitiseHtml } from "@/lib/sanitise";
 
 const EDITABLE_FIELDS = new Set([
   "section_name",
@@ -174,12 +175,23 @@ export async function PATCH(
     delete updates.item_name;
   }
 
+  // Sanitize comment_text on write path
+  if ("comment_text" in updates && typeof updates.comment_text === "string") {
+    updates.comment_text = sanitiseHtml(updates.comment_text);
+  }
+
   // ── Apply remaining field-level updates ────────────────────────────────────
   if (Object.keys(updates).length > 0) {
-    const { error: updateErr } = await service
+    let updateQuery = service
       .from("fields")
       .update(updates)
       .eq("id", fieldId);
+
+    if (clientUpdatedAt) {
+      updateQuery = updateQuery.eq("updated_at", clientUpdatedAt);
+    }
+
+    const { data: updatedRows, error: updateErr } = await updateQuery.select();
 
     if (updateErr) {
       return NextResponse.json(
@@ -190,6 +202,20 @@ export async function PATCH(
           },
         },
         { status: 500 }
+      );
+    }
+
+    if (clientUpdatedAt && (!updatedRows || updatedRows.length === 0)) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "CONFLICT",
+            message:
+              "This field was modified in another tab or session. " +
+              "Please reload to see the latest version before editing.",
+          },
+        },
+        { status: 409 }
       );
     }
   }

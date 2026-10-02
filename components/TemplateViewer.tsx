@@ -24,7 +24,12 @@ interface Field {
   updated_at: string;
 }
 
-type EditTarget = { fieldId: string; field: 'comment_text' } | null;
+type EditTarget =
+  | { type: 'comment_text'; fieldId: string }
+  | { type: 'comment_name'; fieldId: string }
+  | { type: 'section_name'; sectionPos: number; fieldId: string }
+  | { type: 'item_name'; sectionPos: number; itemPos: number; fieldId: string }
+  | null;
 
 interface Props {
   templateId: string;
@@ -78,10 +83,31 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
 
   // ── Edit handlers ──────────────────────────────────────────────────────────
 
-  const startEdit = useCallback((field: Field) => {
+  const startEditCommentText = useCallback((field: Field) => {
     if (isSeed) return;
-    setEditTarget({ fieldId: field.id, field: 'comment_text' });
+    setEditTarget({ type: 'comment_text', fieldId: field.id });
     setEditValue(field.comment_text ?? '');
+    setError(null);
+  }, [isSeed]);
+
+  const startEditCommentName = useCallback((field: Field) => {
+    if (isSeed) return;
+    setEditTarget({ type: 'comment_name', fieldId: field.id });
+    setEditValue(field.comment_name ?? '');
+    setError(null);
+  }, [isSeed]);
+
+  const startEditSectionName = useCallback((sectionPos: number, firstField: Field) => {
+    if (isSeed) return;
+    setEditTarget({ type: 'section_name', sectionPos, fieldId: firstField.id });
+    setEditValue(firstField.section_name);
+    setError(null);
+  }, [isSeed]);
+
+  const startEditItemName = useCallback((sectionPos: number, itemPos: number, firstField: Field) => {
+    if (isSeed) return;
+    setEditTarget({ type: 'item_name', sectionPos, itemPos, fieldId: firstField.id });
+    setEditValue(firstField.item_name);
     setError(null);
   }, [isSeed]);
 
@@ -92,25 +118,47 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
   }, []);
 
   const saveEdit = useCallback((field: Field) => {
+    if (!editTarget) return;
     startSaving(async () => {
+      const payload: Record<string, unknown> = {
+        updated_at: field.updated_at,
+      };
+
+      if (editTarget.type === 'comment_text') {
+        payload.comment_text = editValue;
+      } else if (editTarget.type === 'comment_name') {
+        payload.comment_name = editValue;
+      } else if (editTarget.type === 'section_name') {
+        payload.section_name = editValue;
+      } else if (editTarget.type === 'item_name') {
+        payload.item_name = editValue;
+      }
+
       const res = await fetch(`/api/fields/${field.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          comment_text: editValue,
-          updated_at: field.updated_at,
-        }),
+        body: JSON.stringify(payload),
       });
       const json = await res.json();
       if (!res.ok) {
         setError(json.error?.message ?? 'Save failed');
         return;
       }
-      // Update local state
-      setFields(prev => prev.map(f => f.id === field.id ? { ...f, comment_text: editValue, updated_at: json.field.updated_at } : f));
+
+      // Update local state based on edit type
+      if (editTarget.type === 'comment_text') {
+        setFields(prev => prev.map(f => f.id === field.id ? { ...f, comment_text: editValue, updated_at: json.field.updated_at } : f));
+      } else if (editTarget.type === 'comment_name') {
+        setFields(prev => prev.map(f => f.id === field.id ? { ...f, comment_name: editValue, updated_at: json.field.updated_at } : f));
+      } else if (editTarget.type === 'section_name') {
+        setFields(prev => prev.map(f => f.section_pos === editTarget.sectionPos ? { ...f, section_name: editValue, updated_at: json.field.updated_at } : f));
+      } else if (editTarget.type === 'item_name') {
+        setFields(prev => prev.map(f => f.section_pos === editTarget.sectionPos && f.item_pos === editTarget.itemPos ? { ...f, item_name: editValue, updated_at: json.field.updated_at } : f));
+      }
+
       setEditTarget(null);
     });
-  }, [editValue]);
+  }, [editTarget, editValue]);
 
   const revertField = useCallback((field: Field) => {
     if (isSeed) return;
@@ -210,30 +258,106 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
         {Array.from(sections.entries()).map(([sectionPos, section]) => (
           <div key={sectionPos} className="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
             {/* Section header */}
-            <button
-              onClick={() => toggleSection(sectionPos)}
-              className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-left"
-            >
-              <div className="flex items-center gap-2">
+            <div className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+              <button
+                onClick={() => toggleSection(sectionPos)}
+                className="flex items-center gap-2 text-left flex-1"
+              >
                 <span className="text-gray-400 text-sm">{expandedSections.has(sectionPos) ? '▼' : '▶'}</span>
-                <span className="font-semibold text-gray-900 dark:text-gray-100">{section.name}</span>
+                {editTarget?.type === 'section_name' && editTarget.sectionPos === sectionPos ? (
+                  <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      autoFocus
+                      type="text"
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      className="px-2 py-0.5 text-sm font-semibold border border-blue-400 rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                    />
+                    <button
+                      onClick={() => {
+                        const firstField = Array.from(section.items.values())[0]?.fields[0];
+                        if (firstField) saveEdit(firstField);
+                      }}
+                      disabled={saving}
+                      className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={cancelEdit}
+                      className="text-xs px-2 py-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <span className="font-semibold text-gray-900 dark:text-gray-100">{section.name}</span>
+                )}
                 <span className="text-xs text-gray-400 dark:text-gray-500">
-                  {section.items.size} items · {Array.from(section.items.values()).reduce((n, i) => n + i.fields.length, 0)} fields
+                  {section.items.size} items · {Array.from(section.items.values()).reduce((n, i) => n + i.fields.length, 0)} comments
                 </span>
-              </div>
-            </button>
+              </button>
+              {!isSeed && editTarget?.type !== 'section_name' && (
+                <button
+                  onClick={() => {
+                    const firstField = Array.from(section.items.values())[0]?.fields[0];
+                    if (firstField) startEditSectionName(sectionPos, firstField);
+                  }}
+                  className="text-xs text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 px-2 py-1 rounded transition-colors"
+                  title="Rename section"
+                >
+                  ✎ Rename section
+                </button>
+              )}
+            </div>
 
             {/* Items */}
             {expandedSections.has(sectionPos) && (
               <div className="divide-y divide-gray-100 dark:divide-gray-800">
                 {Array.from(section.items.entries()).map(([itemPos, item]) => (
                   <div key={itemPos} className="px-4 py-3">
-                    <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2 uppercase tracking-wide">
-                      {item.name}
-                    </h3>
+                    <div className="flex items-center justify-between mb-2">
+                      {editTarget?.type === 'item_name' && editTarget.sectionPos === sectionPos && editTarget.itemPos === itemPos ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            autoFocus
+                            type="text"
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            className="px-2 py-0.5 text-xs uppercase font-medium border border-blue-400 rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                          />
+                          <button
+                            onClick={() => saveEdit(item.fields[0])}
+                            disabled={saving}
+                            className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={cancelEdit}
+                            className="text-xs px-2 py-0.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <h3 className="text-sm font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wide">
+                          {item.name}
+                        </h3>
+                      )}
+                      {!isSeed && editTarget?.type !== 'item_name' && (
+                        <button
+                          onClick={() => startEditItemName(sectionPos, itemPos, item.fields[0])}
+                          className="text-xs text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 px-1 py-0.5 rounded transition-colors"
+                          title="Rename item"
+                        >
+                          ✎ Rename item
+                        </button>
+                      )}
+                    </div>
                     <div className="space-y-2">
                       {item.fields.map((field) => {
-                        const isEditing = editTarget?.fieldId === field.id;
+                        const isEditing = editTarget?.type === 'comment_text' && editTarget.fieldId === field.id;
                         const isModified = field.comment_text !== field.snap_comment_text || field.comment_name !== field.snap_comment_name;
 
                         return (
@@ -250,9 +374,34 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
                             {/* Field header */}
                             <div className="flex items-start justify-between gap-2 mb-1">
                               <div className="flex items-center gap-2 flex-wrap">
-                                <span className="text-sm font-medium text-gray-800 dark:text-gray-200">
-                                  {field.comment_name || <span className="italic text-gray-400">(no name)</span>}
-                                </span>
+                                {editTarget?.type === 'comment_name' && editTarget.fieldId === field.id ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      autoFocus
+                                      type="text"
+                                      value={editValue}
+                                      onChange={(e) => setEditValue(e.target.value)}
+                                      className="px-2 py-0.5 text-sm border border-blue-400 rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                                    />
+                                    <button
+                                      onClick={() => saveEdit(field)}
+                                      disabled={saving}
+                                      className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700"
+                                    >
+                                      Save
+                                    </button>
+                                    <button
+                                      onClick={cancelEdit}
+                                      className="text-xs px-2 py-0.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                                    {field.comment_name || <span className="italic text-gray-400">(no name)</span>}
+                                  </span>
+                                )}
                                 {field.comment_type && (
                                   <span className={`text-xs font-medium ${commentTypeColor(field.comment_type)}`}>
                                     {field.comment_type}
@@ -283,12 +432,21 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
                                     </button>
                                   )}
                                   {!isEditing && (
-                                    <button
-                                      onClick={() => startEdit(field)}
-                                      className="text-xs px-2 py-1 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
-                                    >
-                                      Edit
-                                    </button>
+                                    <>
+                                      <button
+                                        onClick={() => startEditCommentName(field)}
+                                        className="text-xs px-2 py-1 text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 hover:bg-gray-50 dark:hover:bg-gray-800 rounded transition-colors"
+                                        title="Rename comment"
+                                      >
+                                        Rename
+                                      </button>
+                                      <button
+                                        onClick={() => startEditCommentText(field)}
+                                        className="text-xs px-2 py-1 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
+                                      >
+                                        Edit Text
+                                      </button>
+                                    </>
                                   )}
                                 </div>
                               )}

@@ -134,8 +134,19 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     }
   }
 
-  // 4. Build OOXML (.xlsx) workbook using SheetJS
-  const wsData = [snapshot.headers, ...exportRows];
+  // Helper to prevent Excel formula injection (CSV/XLS macro injection)
+  function sanitizeFormulaCell(val: unknown): unknown {
+    if (typeof val === "string" && /^[=+\-@\t\r]/.test(val)) {
+      return `'${val}`;
+    }
+    return val;
+  }
+
+  // 4. Build OOXML (.xlsx) workbook using SheetJS with formula injection protection
+  const safeExportRows = exportRows.map((row) =>
+    (row as unknown[]).map(sanitizeFormulaCell)
+  );
+  const wsData = [snapshot.headers, ...safeExportRows];
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Sheet1");

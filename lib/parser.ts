@@ -49,6 +49,9 @@ export interface ParsedTemplate {
   snapshot_rows: unknown[][]; // full 42×N matrix for verifier
   fields: ParsedField[];
   issues: ImportIssue[];
+  rows_skipped?: number;
+  rows_processed?: number;
+  rows_empty?: number;
 }
 
 export interface ImportIssue {
@@ -158,6 +161,19 @@ export const FORMAT_ERRORS: Record<string, { code: string; message: string }> =
     },
   };
 
+export function decodeEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+export function normalizeHeaderName(h: string): string {
+  return h.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 // ─── Main parser ─────────────────────────────────────────────────────────────
 
 export function parseSpectoraExport(
@@ -218,9 +234,17 @@ export function parseSpectoraExport(
 
   // 4. Validate headers
   const headerSet = new Set(headers.filter(Boolean));
+  const normHeaderMap = new Map<string, string>();
+  for (const h of headers.filter(Boolean)) {
+    normHeaderMap.set(normalizeHeaderName(h), h);
+  }
+
   const missing: string[] = [];
   for (const req of REQUIRED_HEADERS) {
-    if (!headerSet.has(req)) missing.push(req);
+    const normReq = normalizeHeaderName(req);
+    if (!headerSet.has(req) && !normHeaderMap.has(normReq)) {
+      missing.push(req);
+    }
   }
   if (missing.length > 0) {
     throw new ParseError(
@@ -231,21 +255,26 @@ export function parseSpectoraExport(
     );
   }
 
-  // Column index lookup by header name
+  // Column index lookup by header name (both exact and normalized)
   const colIdx: Record<string, number> = {};
   headers.forEach((h, i) => {
-    if (h) colIdx[h] = i;
+    if (h) {
+      colIdx[h] = i;
+      colIdx[normalizeHeaderName(h)] = i;
+    }
   });
 
-  // Helper to read a cell as string, raw — NO extra decode
+  // Helper to read a cell as string
   function cellStr(row: number, header: string): string | null {
-    const c = colIdx[header];
+    let c = colIdx[header];
+    if (c === undefined) {
+      c = colIdx[normalizeHeaderName(header)];
+    }
     if (c === undefined) return null;
     const cell = ws[XLSX.utils.encode_cell({ r: row, c })];
     if (!cell || cell.v === undefined || cell.v === null || cell.v === "") {
       return null;
     }
-    // raw:true means cell.v is already the raw value; convert to string
     return String(cell.v);
   }
 
@@ -263,11 +292,13 @@ export function parseSpectoraExport(
 
   // Track hierarchy state
   let sectionPos = -1;
+  let maxSectionPos = -1;
   let currentSection = "";
   let lastSeenSectionName: string | null = null; // for blank-cell inheritance
   let lastSeenItemName: string | null = null;     // for blank-cell inheritance
   const sectionItemPos: Record<number, number> = {};
   const sectionItemFieldPos: Record<string, number> = {};
+  const itemSeenOrders: Record<string, Set<number>> = {};
 
   // Disjoint block detection: tracks whether we've seen a section/item before
   // and whether it appeared AFTER something else (non-contiguous)
@@ -279,7 +310,7 @@ export function parseSpectoraExport(
   // Row accountability counters (proves processed + empty + skipped = total)
   let rowsProcessed = 0;
   let rowsEmpty = 0;
-  let rowsSkipped = 0; // orphan rows with no section name
+  let rowsSkipped = 0;
 
   // Detect if file looks like plain-text (no HTML in any comment text)
   let anyHtmlFound = false;
@@ -304,15 +335,24 @@ export function parseSpectoraExport(
       continue;
     }
 
-    // ── BLANK CELL INHERITANCE ──────────────────────────────────────────────
+    // ── BLANK CELL INHERITANCE & ITEM ISOLATION ────────────────────────────
     // Spectora uses Excel visual grouping: rows in the same section/item leave
     // the Section Name / Item Name cell blank. Carry forward the last non-blank
-    // value. Without this, real files produce spurious "(unknown)" sections.
-    const sectionName = rawSectionName ?? lastSeenSectionName;
-    const itemName    = rawItemName    ?? lastSeenItemName;
+    // value. When a new section starts, clear lastSeenItemName so items from the
+    // previous section never contaminate the new section.
+    if (rawSectionName && rawSectionName !== lastSeenSectionName) {
+      lastSeenItemName = null;
+      lastSeenSectionName = rawSectionName;
+    }
+    if (rawItemName) {
+      lastSeenItemName = rawItemName;
+    }
 
-    if (rawSectionName) lastSeenSectionName = rawSectionName;
-    if (rawItemName)    lastSeenItemName    = rawItemName;
+    const effectiveRawSection = rawSectionName ?? lastSeenSectionName;
+    const effectiveRawItem = rawItemName ?? lastSeenItemName;
+
+    let sectionName = effectiveRawSection ? decodeEntities(effectiveRawSection) : "";
+    let itemName = effectiveRawItem ? decodeEntities(effectiveRawItem) : "";
 
     // If still no section name even after inheritance, it is a true orphan
     if (!sectionName) {
@@ -348,7 +388,8 @@ export function parseSpectoraExport(
         seenSectionNames.add(sectionName);
         prevSection = sectionName;
         if (sectionName !== currentSection) {
-          sectionPos++;
+          maxSectionPos++;
+          sectionPos = maxSectionPos;
           currentSection = sectionName;
           sectionItemPos[sectionPos] = -1;
           // Record this section's position for potential disjoint merge later
@@ -389,17 +430,24 @@ export function parseSpectoraExport(
       anyHtmlFound = true;
     }
 
-    // Order column — document tie if present (never sort by it)
+    // Order column — check for ties within item
     const orderVal = cellStr(r, "Order (w/i item)");
     if (orderVal !== null) {
       const orderNum = Number(orderVal);
-      if (!isNaN(orderNum) && orderNum === 0 && currentFieldPos > 0) {
-        issues.push({
-          source_row: r + 1,
-          severity: "info",
-          code: "ORDER_TIE",
-          message: `Row ${r + 1}: Order value is ${orderVal} (tied/zero). Physical row order is used, not the Order column.`,
-        });
+      if (!isNaN(orderNum)) {
+        if (!itemSeenOrders[itemKey]) {
+          itemSeenOrders[itemKey] = new Set<number>();
+        }
+        if (itemSeenOrders[itemKey].has(orderNum)) {
+          issues.push({
+            source_row: r + 1,
+            severity: "info",
+            code: "ORDER_TIE",
+            message: `Row ${r + 1}: Order value ${orderVal} is tied within item. Physical sequence is preserved.`,
+          });
+        } else {
+          itemSeenOrders[itemKey].add(orderNum);
+        }
       }
     }
 
@@ -411,6 +459,8 @@ export function parseSpectoraExport(
       rawCells[h] = cell ? (cell.v ?? null) : null;
     });
 
+    const cleanCommentName = commentName ? decodeEntities(commentName) : "";
+
     fields.push({
       source_row: r + 1, // 1-based for display consistency
       section_pos: sectionPos,
@@ -418,8 +468,8 @@ export function parseSpectoraExport(
       field_pos: currentFieldPos,
 
       section_name: effectiveSection,
-      item_name: itemName ?? "(unknown)",
-      comment_name: commentName ?? "",
+      item_name: itemName || "(unknown)",
+      comment_name: cleanCommentName,
       comment_text: commentText,
 
       comment_type: cellStr(r, "Comment Type (info, limit, defect)"),
@@ -435,8 +485,8 @@ export function parseSpectoraExport(
 
       // As-imported snapshots — set at parse time, never mutated
       snap_section_name: effectiveSection,
-      snap_item_name: itemName ?? "(unknown)",
-      snap_comment_name: commentName ?? "",
+      snap_item_name: itemName || "(unknown)",
+      snap_comment_name: cleanCommentName,
       snap_comment_text: commentText,
 
       raw_cells: rawCells,
@@ -485,6 +535,9 @@ export function parseSpectoraExport(
     snapshot_rows: snapshotRows,
     fields,
     issues,
+    rows_skipped: rowsSkipped,
+    rows_processed: rowsProcessed,
+    rows_empty: rowsEmpty,
   };
 }
 
