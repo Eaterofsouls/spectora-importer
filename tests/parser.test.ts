@@ -118,7 +118,7 @@ describe("parseSpectoraExport — basic correctness", () => {
     expect(result.fields[0].section_pos).toBe(0);
     expect(result.fields[0].item_pos).toBe(0);
     expect(result.fields[0].field_pos).toBe(0);
-    expect(result.fields[0].source_row).toBe(1);
+    expect(result.fields[0].source_row).toBe(2); // header=row1, first data=row2 (1-based display)
   });
 
   test("preserves null comment_text (83/392 rows in InterNACHI)", () => {
@@ -177,7 +177,7 @@ describe("parseSpectoraExport — ENTITY ENCODING TRAP (Trap 2)", () => {
   });
 });
 
-describe("parseSpectoraExport — TYPE COERCION TRAP (SheetJS Attack 2)", () => {
+describe("parseSpectoraExport — TYPE COERCION TRAP (date and numeric string preservation)", () => {
   test("date-looking strings are not coerced to Date objects", () => {
     const buf = buildOoxml(MINIMAL_HEADERS, [
       minimalRow({ "Comment Text": "2026-10-01" }),

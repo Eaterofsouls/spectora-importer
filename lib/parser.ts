@@ -1,13 +1,14 @@
 /**
  * parser.ts — Spectora "Export HTML Text" OOXML parser
  *
- * Design decisions (from ARCHITECTURE.md):
+ * Parser Design Decisions:
  * - Magic-byte format detection, not extension-based
- * - SheetJS with { raw: true } to prevent type coercion (Attack #2 fix)
- * - Iterates over full !ref range to catch blank rows (Attack #6 fix)
- * - Physical row order → section_pos/item_pos/field_pos (never uses Order column for sorting)
- * - Stores options_raw as raw string — never split on commas
- * - HTML content stored byte-identical; no sanitisation at parse time
+ * - SheetJS with { raw: true } to prevent silent type coercion (dates, numbers, strings preserved)
+ * - Iterates over full !ref range to catch blank rows and maintain physical row alignment
+ * - Physical row order → section_pos/item_pos/field_pos (never relies on tied Order column)
+ * - Stores options_raw as raw string — never prematurely split on commas
+ * - Visual grouping inheritance: carries forward parent section/item for blank rows
+ * - Disjoint section detection: merges non-contiguous blocks with user warnings
  */
 
 import * as XLSX from "xlsx";
@@ -263,8 +264,22 @@ export function parseSpectoraExport(
   // Track hierarchy state
   let sectionPos = -1;
   let currentSection = "";
+  let lastSeenSectionName: string | null = null; // for blank-cell inheritance
+  let lastSeenItemName: string | null = null;     // for blank-cell inheritance
   const sectionItemPos: Record<number, number> = {};
   const sectionItemFieldPos: Record<string, number> = {};
+
+  // Disjoint block detection: tracks whether we've seen a section/item before
+  // and whether it appeared AFTER something else (non-contiguous)
+  const seenSectionNames = new Set<string>();
+  const closedSections = new Set<string>(); // sections we left and may not come back to
+  const sectionNameToPos: Record<string, number> = {}; // section name → first sectionPos
+  let prevSection = "";
+
+  // Row accountability counters (proves processed + empty + skipped = total)
+  let rowsProcessed = 0;
+  let rowsEmpty = 0;
+  let rowsSkipped = 0; // orphan rows with no section name
 
   // Detect if file looks like plain-text (no HTML in any comment text)
   let anyHtmlFound = false;
@@ -279,32 +294,70 @@ export function parseSpectoraExport(
     });
     snapshotRows.push(rawRow);
 
-    const sectionName = cellStr(r, "Section Name");
-    const itemName = cellStr(r, "Item Name");
-    const commentName = cellStr(r, "Comment Name");
+    const rawSectionName = cellStr(r, "Section Name");
+    const rawItemName    = cellStr(r, "Item Name");
+    const commentName    = cellStr(r, "Comment Name");
 
-    // Blank row — skip to data but keep source_row counter accurate
-    if (!sectionName && !itemName && !commentName) {
+    // Blank row — skip but keep source_row counter accurate
+    if (!rawSectionName && !rawItemName && !commentName) {
+      rowsEmpty++;
       continue;
     }
 
-    // Orphan row — no section name
+    // ── BLANK CELL INHERITANCE ──────────────────────────────────────────────
+    // Spectora uses Excel visual grouping: rows in the same section/item leave
+    // the Section Name / Item Name cell blank. Carry forward the last non-blank
+    // value. Without this, real files produce spurious "(unknown)" sections.
+    const sectionName = rawSectionName ?? lastSeenSectionName;
+    const itemName    = rawItemName    ?? lastSeenItemName;
+
+    if (rawSectionName) lastSeenSectionName = rawSectionName;
+    if (rawItemName)    lastSeenItemName    = rawItemName;
+
+    // If still no section name even after inheritance, it is a true orphan
     if (!sectionName) {
       issues.push({
-        source_row: r,
-        severity: "error",
+        source_row: r + 1,
+        severity: "warning",
         code: "ORPHAN_ROW",
-        message: `Row ${r} has no Section Name. It will be imported under section "(unknown)".`,
+        message: `Row ${r + 1} has no Section Name (and no previous section to inherit). Skipped.`,
       });
+      rowsSkipped++;
+      continue;
     }
 
-    // Track section position
-    const effectiveSection = sectionName ?? "(unknown)";
-    if (effectiveSection !== currentSection) {
-      sectionPos++;
-      currentSection = effectiveSection;
-      sectionItemPos[sectionPos] = -1;
+    // ── DISJOINT SECTION DETECTION ───────────────────────────────────────────
+    if (sectionName !== prevSection) {
+      if (seenSectionNames.has(sectionName) && closedSections.has(sectionName)) {
+        // We LEFT this section, went somewhere else, and came back — non-contiguous
+        issues.push({
+          source_row: r + 1,
+          severity: "warning",
+          code: "DISJOINT_SECTION",
+          message: `Section "${sectionName}" appears again at row ${r + 1} after other sections. ` +
+            `Spectora may have split it — rows are merged into the original section block.`,
+        });
+        // Reuse original sectionPos for this section name (so disjoint rows merge)
+        const originalPos = (sectionNameToPos as Record<string, number>)[sectionName];
+        sectionPos = originalPos;
+        currentSection = sectionName;
+        prevSection = sectionName;
+      } else {
+        // Genuinely new section (or first time seeing it)
+        if (prevSection) closedSections.add(prevSection);
+        seenSectionNames.add(sectionName);
+        prevSection = sectionName;
+        if (sectionName !== currentSection) {
+          sectionPos++;
+          currentSection = sectionName;
+          sectionItemPos[sectionPos] = -1;
+          // Record this section's position for potential disjoint merge later
+          (sectionNameToPos as Record<string, number>)[sectionName] = sectionPos;
+        }
+      }
     }
+
+    const effectiveSection = sectionName;
 
     // Track item position within section
     const itemKey = `${sectionPos}::${itemName ?? ""}`;
@@ -327,10 +380,10 @@ export function parseSpectoraExport(
     const commentText = cellStr(r, "Comment Text");
     if (commentText === null) {
       issues.push({
-        source_row: r,
+        source_row: r + 1,
         severity: "info",
         code: "EMPTY_COMMENT_TEXT",
-        message: `Row ${r}: "${commentName ?? ""}" has no comment text (this is normal for fields/questions).`,
+        message: `Row ${r + 1}: "${commentName ?? ""}" has no comment text (normal for input fields).`,
       });
     } else if (/<[a-z]/.test(commentText)) {
       anyHtmlFound = true;
@@ -342,15 +395,15 @@ export function parseSpectoraExport(
       const orderNum = Number(orderVal);
       if (!isNaN(orderNum) && orderNum === 0 && currentFieldPos > 0) {
         issues.push({
-          source_row: r,
+          source_row: r + 1,
           severity: "info",
           code: "ORDER_TIE",
-          message: `Row ${r}: Order value is ${orderVal} (tied/zero). Physical row order is used for sequencing, not the Order column.`,
+          message: `Row ${r + 1}: Order value is ${orderVal} (tied/zero). Physical row order is used, not the Order column.`,
         });
       }
     }
 
-    // Build raw_cells — ALL 42 columns by header name
+    // Build raw_cells — ALL columns by header name, nothing dropped
     const rawCells: Record<string, unknown> = {};
     headers.forEach((h, c) => {
       if (!h) return;
@@ -359,7 +412,7 @@ export function parseSpectoraExport(
     });
 
     fields.push({
-      source_row: r,
+      source_row: r + 1, // 1-based for display consistency
       section_pos: sectionPos,
       item_pos: currentItemPos,
       field_pos: currentFieldPos,
@@ -388,9 +441,25 @@ export function parseSpectoraExport(
 
       raw_cells: rawCells,
     });
+    rowsProcessed++;
   }
 
-  if (fields.length === 0) {
+  // ── ROW ACCOUNTABILITY ───────────────────────────────────────────────────
+  // Prove: processed + empty + skipped = numDataRows (all rows accounted for)
+  const totalDataRows = numDataRows;
+  const accountedRows = rowsProcessed + rowsEmpty + rowsSkipped;
+  if (accountedRows !== totalDataRows) {
+    issues.push({
+      source_row: null,
+      severity: "warning",
+      code: "UNACCOUNTED_ROWS",
+      message: `Row accounting: ${rowsProcessed} data + ${rowsEmpty} blank + ${rowsSkipped} skipped = ${accountedRows}, ` +
+        `but sheet has ${totalDataRows} data rows. ${totalDataRows - accountedRows} rows unaccounted.`,
+    });
+  }
+
+  // Only throw if there are genuinely NO rows of any kind
+  if (fields.length === 0 && accountedRows === 0) {
     throw new ParseError(
       "EMPTY_SHEET",
       "The file has headers but no data rows."
