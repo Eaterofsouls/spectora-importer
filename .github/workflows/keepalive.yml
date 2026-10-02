@@ -1,0 +1,21 @@
+name: Supabase keepalive
+
+on:
+  schedule:
+    # Every 48h — prevents Supabase free-tier from pausing after 7 days idle
+    - cron: '0 */48 * * *'
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase health endpoint
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}/rest/v1/" \
+            -H "apikey: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}")
+          echo "Supabase responded: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Warning: unexpected status $STATUS"
+          fi
