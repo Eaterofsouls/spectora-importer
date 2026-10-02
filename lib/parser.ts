@@ -1,0 +1,432 @@
+/**
+ * parser.ts — Spectora "Export HTML Text" OOXML parser
+ *
+ * Design decisions (from ARCHITECTURE.md):
+ * - Magic-byte format detection, not extension-based
+ * - SheetJS with { raw: true } to prevent type coercion (Attack #2 fix)
+ * - Iterates over full !ref range to catch blank rows (Attack #6 fix)
+ * - Physical row order → section_pos/item_pos/field_pos (never uses Order column for sorting)
+ * - Stores options_raw as raw string — never split on commas
+ * - HTML content stored byte-identical; no sanitisation at parse time
+ */
+
+import * as XLSX from "xlsx";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export interface ParsedField {
+  source_row: number; // 1-based physical row index (including blank rows)
+  section_pos: number; // 0-based ordinal of section (order of first appearance)
+  item_pos: number; // 0-based ordinal of item within section
+  field_pos: number; // 0-based ordinal of field within (section, item)
+
+  // Editable columns
+  section_name: string;
+  item_name: string;
+  comment_name: string;
+  comment_text: string | null; // null = 83 "empty text" rows — preserve, never drop
+
+  // Behaviour columns (stored, read-only in UI)
+  comment_type: string | null; // info | limit | defect
+  category: number | null; // -1 | 0 | 1 | null
+  answer_type: string | null; // boolean | checkbox | date | number | range | text
+  options_raw: string | null; // raw comma-joined string; NEVER parsed and discarded
+
+  // Snapshot of as-imported editable fields (immutable after insert)
+  snap_section_name: string;
+  snap_item_name: string;
+  snap_comment_name: string;
+  snap_comment_text: string | null;
+
+  // All 42 columns keyed by header — nothing dropped
+  raw_cells: Record<string, unknown>;
+}
+
+export interface ParsedTemplate {
+  source_filename: string;
+  headers: string[];
+  snapshot_rows: unknown[][]; // full 42×N matrix for verifier
+  fields: ParsedField[];
+  issues: ImportIssue[];
+}
+
+export interface ImportIssue {
+  source_row: number | null; // null = file-level issue
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+// Required headers (order-insensitive). A superset is OK; missing = error.
+const REQUIRED_HEADERS = new Set([
+  "Section Name",
+  "Item Name",
+  "Comment Name",
+  "Comment Text",
+  "Comment Type (info, limit, defect)",
+  "Category (-1: Low, 0: Med, 1: High)",
+  "Multiple Choice Options (comma-separated)",
+  "Order (w/i item)",
+  "Answer Type (boolean, checkbox, date, number, range, text)",
+]);
+
+// Spectora HTML download page detection: contains this string near the top
+const SPECTORA_DOWNLOAD_PAGE_MARKER =
+  "your download is ready";
+
+// Magic byte signatures
+const OOXML_MAGIC = [0x50, 0x4b, 0x03, 0x04]; // PK zip
+const OLE2_MAGIC = [0xd0, 0xcf, 0x11, 0xe0]; // legacy binary .xls
+
+// ─── Format detection ────────────────────────────────────────────────────────
+
+export type FileFormat =
+  | "ooxml"
+  | "ole2_legacy"
+  | "spectora_download_page"
+  | "plain_text"
+  | "unknown";
+
+export function detectFormat(buffer: Buffer): FileFormat {
+  if (buffer.length < 4) return "unknown";
+
+  // Check OOXML (PK zip)
+  if (
+    buffer[0] === OOXML_MAGIC[0] &&
+    buffer[1] === OOXML_MAGIC[1] &&
+    buffer[2] === OOXML_MAGIC[2] &&
+    buffer[3] === OOXML_MAGIC[3]
+  ) {
+    return "ooxml";
+  }
+
+  // Check OLE2 legacy binary .xls
+  if (
+    buffer[0] === OLE2_MAGIC[0] &&
+    buffer[1] === OLE2_MAGIC[1] &&
+    buffer[2] === OLE2_MAGIC[2] &&
+    buffer[3] === OLE2_MAGIC[3]
+  ) {
+    return "ole2_legacy";
+  }
+
+  // Text-based: check for Spectora download page HTML
+  const head = buffer.subarray(0, 2048).toString("utf8").toLowerCase();
+  if (head.includes(SPECTORA_DOWNLOAD_PAGE_MARKER)) {
+    return "spectora_download_page";
+  }
+
+  // Could be plain-text export or other text
+  if (head.startsWith("section") || head.includes("\t") || head.includes(",")) {
+    return "plain_text";
+  }
+
+  return "unknown";
+}
+
+// Human-readable error messages by format
+export const FORMAT_ERRORS: Record<string, { code: string; message: string }> =
+  {
+    ole2_legacy: {
+      code: "LEGACY_XLS_FORMAT",
+      message:
+        "This appears to be an older Excel binary file (.xls OLE2 format). " +
+        "Spectora exports use a newer format (OOXML). " +
+        "Please re-export using Templates → Export to Spreadsheet → Export HTML Text.",
+    },
+    spectora_download_page: {
+      code: "SPECTORA_DOWNLOAD_PAGE",
+      message:
+        "This looks like the Spectora 'Your download is ready' page, not the spreadsheet itself. " +
+        "Click the 'Download File' button on that page, then upload the downloaded file here.",
+    },
+    plain_text: {
+      code: "PLAIN_TEXT_EXPORT",
+      message:
+        "This appears to be a plain-text export. Spectora's plain-text export loses HTML " +
+        "formatting (bold, links, paragraph breaks). " +
+        "Please re-export using Templates → Export to Spreadsheet → Export HTML Text.",
+    },
+    unknown: {
+      code: "NOT_A_SPREADSHEET",
+      message:
+        "This file does not appear to be a Spectora spreadsheet export. " +
+        "Expected an OOXML file from Templates → Export to Spreadsheet → Export HTML Text.",
+    },
+  };
+
+// ─── Main parser ─────────────────────────────────────────────────────────────
+
+export function parseSpectoraExport(
+  buffer: Buffer,
+  filename: string
+): ParsedTemplate {
+  const issues: ImportIssue[] = [];
+
+  // 1. Format detection
+  const fmt = detectFormat(buffer);
+  if (fmt !== "ooxml") {
+    const err = FORMAT_ERRORS[fmt] ?? FORMAT_ERRORS["unknown"];
+    throw new ParseError(err.code, err.message);
+  }
+
+  // 2. Parse with SheetJS — raw:true prevents type coercion
+  let wb: XLSX.WorkBook;
+  try {
+    wb = XLSX.read(buffer, {
+      type: "buffer",
+      raw: true,        // no type coercion — strings stay strings
+      cellDates: false, // dates stay as strings
+      cellNF: false,    // no number formatting
+      cellText: false,
+    });
+  } catch (e) {
+    throw new ParseError(
+      "PARSE_FAILED",
+      `Could not parse this file as a spreadsheet: ${(e as Error).message}`
+    );
+  }
+
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) {
+    throw new ParseError("EMPTY_WORKBOOK", "The file contains no sheets.");
+  }
+  const ws = wb.Sheets[sheetName];
+
+  // 3. Extract headers from row 1
+  const ref = ws["!ref"];
+  if (!ref) {
+    throw new ParseError("EMPTY_SHEET", "The sheet appears to be empty.");
+  }
+
+  const range = XLSX.utils.decode_range(ref);
+  const numCols = range.e.c + 1;
+
+  // Read headers from row 0
+  const headers: string[] = [];
+  for (let c = 0; c < numCols; c++) {
+    const cell = ws[XLSX.utils.encode_cell({ r: 0, c })];
+    headers.push(cell ? String(cell.v ?? "") : "");
+  }
+
+  if (headers.every((h) => h === "")) {
+    throw new ParseError("EMPTY_SHEET", "The first row has no headers.");
+  }
+
+  // 4. Validate headers
+  const headerSet = new Set(headers.filter(Boolean));
+  const missing: string[] = [];
+  for (const req of REQUIRED_HEADERS) {
+    if (!headerSet.has(req)) missing.push(req);
+  }
+  if (missing.length > 0) {
+    throw new ParseError(
+      "MISSING_HEADERS",
+      `Missing required columns: ${missing.join(", ")}. ` +
+        `This may not be a Spectora 'Export HTML Text' file, ` +
+        `or it may be a different export type.`
+    );
+  }
+
+  // Column index lookup by header name
+  const colIdx: Record<string, number> = {};
+  headers.forEach((h, i) => {
+    if (h) colIdx[h] = i;
+  });
+
+  // Helper to read a cell as string, raw — NO extra decode
+  function cellStr(row: number, header: string): string | null {
+    const c = colIdx[header];
+    if (c === undefined) return null;
+    const cell = ws[XLSX.utils.encode_cell({ r: row, c })];
+    if (!cell || cell.v === undefined || cell.v === null || cell.v === "") {
+      return null;
+    }
+    // raw:true means cell.v is already the raw value; convert to string
+    return String(cell.v);
+  }
+
+  function cellNum(row: number, header: string): number | null {
+    const s = cellStr(row, header);
+    if (s === null) return null;
+    const n = Number(s);
+    return isNaN(n) ? null : n;
+  }
+
+  // 5. Iterate ALL rows (including blank) — never use sheet_to_json
+  //    This preserves source_row accuracy even if there are blank rows
+  const fields: ParsedField[] = [];
+  const snapshotRows: unknown[][] = [];
+
+  // Track hierarchy state
+  let sectionPos = -1;
+  let currentSection = "";
+  const sectionItemPos: Record<number, number> = {};
+  const sectionItemFieldPos: Record<string, number> = {};
+
+  // Detect if file looks like plain-text (no HTML in any comment text)
+  let anyHtmlFound = false;
+
+  const numDataRows = range.e.r; // last row index (0-based); row 0 = headers
+
+  for (let r = 1; r <= numDataRows; r++) {
+    // Build raw cell array for this row (snapshot)
+    const rawRow: unknown[] = headers.map((_, c) => {
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      return cell ? cell.v ?? null : null;
+    });
+    snapshotRows.push(rawRow);
+
+    const sectionName = cellStr(r, "Section Name");
+    const itemName = cellStr(r, "Item Name");
+    const commentName = cellStr(r, "Comment Name");
+
+    // Blank row — skip to data but keep source_row counter accurate
+    if (!sectionName && !itemName && !commentName) {
+      continue;
+    }
+
+    // Orphan row — no section name
+    if (!sectionName) {
+      issues.push({
+        source_row: r,
+        severity: "error",
+        code: "ORPHAN_ROW",
+        message: `Row ${r} has no Section Name. It will be imported under section "(unknown)".`,
+      });
+    }
+
+    // Track section position
+    const effectiveSection = sectionName ?? "(unknown)";
+    if (effectiveSection !== currentSection) {
+      sectionPos++;
+      currentSection = effectiveSection;
+      sectionItemPos[sectionPos] = -1;
+    }
+
+    // Track item position within section
+    const itemKey = `${sectionPos}::${itemName ?? ""}`;
+    if (!Object.prototype.hasOwnProperty.call(sectionItemPos, itemKey + "_seen")) {
+      // First time we see this (section_pos, item_name) combination
+      sectionItemPos[sectionPos] = (sectionItemPos[sectionPos] ?? -1) + 1;
+      (sectionItemPos as Record<string, number>)[itemKey + "_seen"] = 1;
+      (sectionItemPos as Record<string, number>)[itemKey + "_pos"] =
+        sectionItemPos[sectionPos];
+      sectionItemFieldPos[itemKey] = -1;
+    }
+
+    const currentItemPos = (sectionItemPos as Record<string, number>)[
+      itemKey + "_pos"
+    ];
+    sectionItemFieldPos[itemKey] = (sectionItemFieldPos[itemKey] ?? -1) + 1;
+    const currentFieldPos = sectionItemFieldPos[itemKey];
+
+    // Comment text
+    const commentText = cellStr(r, "Comment Text");
+    if (commentText === null) {
+      issues.push({
+        source_row: r,
+        severity: "info",
+        code: "EMPTY_COMMENT_TEXT",
+        message: `Row ${r}: "${commentName ?? ""}" has no comment text (this is normal for fields/questions).`,
+      });
+    } else if (/<[a-z]/.test(commentText)) {
+      anyHtmlFound = true;
+    }
+
+    // Order column — document tie if present (never sort by it)
+    const orderVal = cellStr(r, "Order (w/i item)");
+    if (orderVal !== null) {
+      const orderNum = Number(orderVal);
+      if (!isNaN(orderNum) && orderNum === 0 && currentFieldPos > 0) {
+        issues.push({
+          source_row: r,
+          severity: "info",
+          code: "ORDER_TIE",
+          message: `Row ${r}: Order value is ${orderVal} (tied/zero). Physical row order is used for sequencing, not the Order column.`,
+        });
+      }
+    }
+
+    // Build raw_cells — ALL 42 columns by header name
+    const rawCells: Record<string, unknown> = {};
+    headers.forEach((h, c) => {
+      if (!h) return;
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      rawCells[h] = cell ? (cell.v ?? null) : null;
+    });
+
+    fields.push({
+      source_row: r,
+      section_pos: sectionPos,
+      item_pos: currentItemPos,
+      field_pos: currentFieldPos,
+
+      section_name: effectiveSection,
+      item_name: itemName ?? "(unknown)",
+      comment_name: commentName ?? "",
+      comment_text: commentText,
+
+      comment_type: cellStr(r, "Comment Type (info, limit, defect)"),
+      category: cellNum(r, "Category (-1: Low, 0: Med, 1: High)"),
+      answer_type: cellStr(
+        r,
+        "Answer Type (boolean, checkbox, date, number, range, text)"
+      ),
+      options_raw: cellStr(
+        r,
+        "Multiple Choice Options (comma-separated)"
+      ),
+
+      // As-imported snapshots — set at parse time, never mutated
+      snap_section_name: effectiveSection,
+      snap_item_name: itemName ?? "(unknown)",
+      snap_comment_name: commentName ?? "",
+      snap_comment_text: commentText,
+
+      raw_cells: rawCells,
+    });
+  }
+
+  if (fields.length === 0) {
+    throw new ParseError(
+      "EMPTY_SHEET",
+      "The file has headers but no data rows."
+    );
+  }
+
+  // Plain-text detection (no HTML tags found in any comment text)
+  if (!anyHtmlFound) {
+    issues.push({
+      source_row: null,
+      severity: "warning",
+      code: "NO_HTML_FOUND",
+      message:
+        "No HTML markup was found in any comment text. " +
+        "This may be a plain-text export (missing formatting). " +
+        "If so, please re-export using 'Export HTML Text'.",
+    });
+  }
+
+  return {
+    source_filename: filename,
+    headers,
+    snapshot_rows: snapshotRows,
+    fields,
+    issues,
+  };
+}
+
+// ─── Error type ───────────────────────────────────────────────────────────────
+
+export class ParseError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "ParseError";
+  }
+}
