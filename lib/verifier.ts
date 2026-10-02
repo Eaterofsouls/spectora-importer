@@ -108,14 +108,14 @@ export async function verifyTemplate(
 
   // 3. Compare each DB field against the snapshot row
   for (const dbField of dbFields) {
-    // Find the snapshot row (source_row is 1-based; rows array is 0-based)
-    const snapshotRowIdx = dbField.source_row - 1;
+    // Find the snapshot row (source_row is 1-based Excel row; row 1 is headers; snapshot.rows[0] is Excel row 2)
+    const snapshotRowIdx = dbField.source_row - 2;
     if (snapshotRowIdx < 0 || snapshotRowIdx >= snapshot.rows.length) {
       mismatches.push({
         source_row: dbField.source_row,
         field: "source_row",
         expected: "row to exist in snapshot",
-        got: "row index out of bounds",
+        got: `row index ${snapshotRowIdx} out of bounds (rows: ${snapshot.rows.length})`,
       });
       continue;
     }
@@ -127,14 +127,19 @@ export async function verifyTemplate(
     const snapComparisons: Array<{
       snapshotHeader: string;
       snapField: string;
+      inheritable?: boolean;
     }> = [
-      { snapshotHeader: "Section Name", snapField: "snap_section_name" },
-      { snapshotHeader: "Item Name", snapField: "snap_item_name" },
+      { snapshotHeader: "Section Name", snapField: "snap_section_name", inheritable: true },
+      { snapshotHeader: "Item Name", snapField: "snap_item_name", inheritable: true },
       { snapshotHeader: "Comment Name", snapField: "snap_comment_name" },
       { snapshotHeader: "Comment Text", snapField: "snap_comment_text" },
+      { snapshotHeader: "Comment Type (info, limit, defect)", snapField: "comment_type" },
+      { snapshotHeader: "Category (-1: Low, 0: Med, 1: High)", snapField: "category" },
+      { snapshotHeader: "Answer Type (boolean, checkbox, date, number, range, text)", snapField: "answer_type" },
+      { snapshotHeader: "Multiple Choice Options (comma-separated)", snapField: "options_raw" },
     ];
 
-    for (const { snapshotHeader, snapField } of snapComparisons) {
+    for (const { snapshotHeader, snapField, inheritable } of snapComparisons) {
       const colIdx = headerIdx[snapshotHeader];
       if (colIdx === undefined) continue;
 
@@ -145,7 +150,16 @@ export async function verifyTemplate(
       const normSnapshot = snapshotVal === "" || snapshotVal === undefined ? null : snapshotVal;
       const normDb = dbVal === "" || dbVal === undefined ? null : dbVal;
 
-      if (normSnapshot !== normDb) {
+      // If snapshot value was blank but field inherited parent section/item name, that is valid
+      if (inheritable && normSnapshot === null && normDb !== null) {
+        continue;
+      }
+
+      // Convert category to number string comparison if numeric
+      const sValStr = normSnapshot !== null ? String(normSnapshot) : null;
+      const dValStr = normDb !== null ? String(normDb) : null;
+
+      if (sValStr !== dValStr) {
         mismatches.push({
           source_row: dbField.source_row,
           field: snapField,
@@ -157,18 +171,15 @@ export async function verifyTemplate(
   }
 
   // 4. Count check
-  const snapshotDataRows = snapshot.rows.filter((row) => {
-    // A row is "data" if at least one of the first 4 columns is non-null
-    return (row as unknown[])
-      .slice(0, 4)
-      .some((v) => v !== null && v !== undefined && v !== "");
+  const snapshotNonEmptyRows = snapshot.rows.filter((row) => {
+    return (row as unknown[]).some((v) => v !== null && v !== undefined && v !== "");
   }).length;
 
-  if (dbFields.length !== snapshotDataRows) {
+  if (dbFields.length !== snapshotNonEmptyRows) {
     mismatches.push({
-      source_row: null as unknown as number,
+      source_row: 0,
       field: "row_count",
-      expected: snapshotDataRows,
+      expected: snapshotNonEmptyRows,
       got: dbFields.length,
     });
   }

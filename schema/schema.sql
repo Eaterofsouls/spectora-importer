@@ -106,7 +106,7 @@ CREATE POLICY "fields: insert own" ON fields
     )
   );
 
--- Section rename fix (Attack #3): cascading UPDATE uses section_pos scope, not name match
+-- Section rename: cascading UPDATE uses section_pos scope, not name match
 -- Application handles cascade: UPDATE fields SET section_name=$new WHERE template_id=$tid AND section_pos=$pos
 CREATE POLICY "fields: update own" ON fields
   FOR UPDATE USING (

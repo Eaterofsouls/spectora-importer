@@ -2,7 +2,7 @@
  * POST /api/templates/[id]/duplicate
  *
  * Deep copies a template. Uses TypeScript chunked inserts (NOT PL/pgSQL)
- * so the logic is readable and modifiable live (Attack #8 fix).
+ * so the logic is completely transparent, debuggable, and maintainable.
  *
  * Guarantees:
  * - New template row with new UUID and new owner_id

@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { parseSpectoraExport, ParseError } from "@/lib/parser";
 import { verifyTemplate } from "@/lib/verifier";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase";
+import { runColumnAudit } from "@/lib/ai-auditor";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -74,6 +75,15 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+
+  // ── 3b. AI column confidence audit (air-gapped — headers + samples only) ──
+  // Runs AFTER deterministic parse. AI cannot affect the parse result.
+  // Results are informational only — stored in import_issues for the report.
+  const aiAudit = await runColumnAudit(
+    parsed.headers,
+    parsed.snapshot_rows.slice(0, 3),
+    process.env.GEMINI_API_KEY
+  );
 
   // ── 4. Ensure user is authenticated (anonymous sign-in done client-side) ──
   const supabaseServer = await await createSupabaseServerClient();
@@ -156,6 +166,18 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Include low confidence columns from AI auditor in issues
+  if (aiAudit.low_confidence_columns.length > 0) {
+    for (const col of aiAudit.low_confidence_columns) {
+      parsed.issues.push({
+        source_row: null,
+        severity: "warning",
+        code: "LOW_CONFIDENCE_COLUMN",
+        message: `Column "${col.header}" flagged by AI auditor (confidence: ${(col.confidence * 100).toFixed(0)}%). Verify values after import.`,
+      });
+    }
+  }
+
   // Insert import issues
   if (parsed.issues.length > 0) {
     const issuesToInsert = parsed.issues.map((issue) => ({
@@ -167,28 +189,41 @@ export async function POST(req: NextRequest) {
     }));
 
     await supabaseService.from("import_issues").insert(issuesToInsert);
-    // Issues insert failure is non-fatal — don't rollback the import
   }
 
-  // ── 6. Run verifier (DB write path check) ─────────────────────────────────
+  // ── 6. Run verifier (DB write path check with automatic rollback) ─────────
   let verification = null;
   try {
     // Use service client — verifier needs to read the template regardless of RLS
     verification = await verifyTemplate(supabaseService, templateId);
 
-    // Store verification results as issues
-    if (!verification.passed && verification.mismatches.length > 0) {
-      const verifyIssues = verification.mismatches.slice(0, 50).map((m) => ({
-        template_id: templateId,
-        source_row: m.source_row,
-        severity: "verify" as const,
-        code: "VERIFICATION_MISMATCH",
-        message: `Field "${m.field}": expected ${JSON.stringify(m.expected)}, got ${JSON.stringify(m.got)}`,
-      }));
-      await supabaseService.from("import_issues").insert(verifyIssues);
+    if (!verification.passed) {
+      // ROLLBACK: Delete template (cascades to fields and import_issues)
+      await supabaseService.from("templates").delete().eq("id", templateId);
+      console.warn("Import rolled back due to verification failure:", verification.mismatches);
+      return NextResponse.json(
+        {
+          error: {
+            code: "VERIFICATION_FAILED",
+            message: `Fidelity verification failed: ${verification.summary}. Entire import rolled back to guarantee database integrity.`,
+            mismatches: verification.mismatches,
+          },
+        },
+        { status: 422 }
+      );
     }
   } catch (e) {
-    console.error("Verifier error (non-fatal):", e);
+    console.error("Verifier error:", e);
+    await supabaseService.from("templates").delete().eq("id", templateId);
+    return NextResponse.json(
+      {
+        error: {
+          code: "VERIFICATION_ERROR",
+          message: "Internal error during write-path verification. Import rolled back.",
+        },
+      },
+      { status: 500 }
+    );
   }
 
   // ── 7. Compute summary stats ───────────────────────────────────────────────
@@ -211,6 +246,11 @@ export async function POST(req: NextRequest) {
     issues: {
       ...issuesByType,
       items: parsed.issues,
+    },
+    ai_audit: {
+      ran: aiAudit.ran,
+      failure_mode: aiAudit.failure_mode,
+      low_confidence_columns: aiAudit.low_confidence_columns,
     },
     verification: verification
       ? {
