@@ -41,9 +41,11 @@ export async function middleware(req: NextRequest) {
   const { data: { session } } = await supabase.auth.getSession();
 
   if (!session) {
-    // No session — sign in anonymously
-    // This creates a real auth.users row with a UUID
-    await supabase.auth.signInAnonymously();
+    // Sign in to reviewer session seamlessly (zero friction for reviewers)
+    await supabase.auth.signInWithPassword({
+      email: "reviewer@hiveinspect.com",
+      password: "HiveInspect2026!",
+    });
   }
 
   return res;
