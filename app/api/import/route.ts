@@ -111,6 +111,10 @@ export async function POST(req: NextRequest) {
         headers: parsed.headers,
         rows: parsed.snapshot_rows,
         rows_skipped: parsed.rows_skipped,
+        rows_empty: parsed.rows_empty,
+        rows_processed: parsed.rows_processed,
+        total_rows: 1 + parsed.snapshot_rows.length,
+        verification_status: "pending_verification",
       },
     })
     .select("id")
@@ -227,6 +231,31 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ── 6b. Atomic transition to verified state ───────────────────────────────
+  await supabaseService
+    .from("templates")
+    .update({
+      snapshot: {
+        headers: parsed.headers,
+        rows: parsed.snapshot_rows,
+        rows_skipped: parsed.rows_skipped,
+        rows_empty: parsed.rows_empty,
+        rows_processed: parsed.rows_processed,
+        total_rows: 1 + parsed.snapshot_rows.length,
+        verification_status: "verified",
+        verified_at: new Date().toISOString(),
+        accounting: verification?.accounting,
+        hierarchy: verification?.hierarchy
+          ? {
+              section_count: verification.hierarchy.section_count,
+              item_count: verification.hierarchy.item_count,
+              comment_count: verification.hierarchy.comment_count,
+            }
+          : undefined,
+      },
+    })
+    .eq("id", templateId);
+
   // ── 7. Compute summary stats ───────────────────────────────────────────────
   const sectionCount = new Set(parsed.fields.map((f) => f.section_pos)).size;
   const itemCount = new Set(
@@ -258,6 +287,14 @@ export async function POST(req: NextRequest) {
           passed: verification.passed,
           summary: verification.summary,
           mismatch_count: verification.mismatches.length,
+          accounting: verification.accounting,
+          hierarchy: verification.hierarchy
+            ? {
+                section_count: verification.hierarchy.section_count,
+                item_count: verification.hierarchy.item_count,
+                comment_count: verification.hierarchy.comment_count,
+              }
+            : undefined,
         }
       : null,
   });
