@@ -211,13 +211,13 @@ export default function ImportUploader() {
 
           {/* Action CTAs */}
           <div className="space-y-2 pt-1">
-            <button
-              onClick={() => router.push(`/templates/${result.template_id}`)}
+            <a
+              href={`/templates/${result.template_id}`}
               className="w-full py-3 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white rounded-xl font-semibold shadow-sm shadow-amber-500/20 text-sm transition-all duration-200 btn-press flex items-center justify-center gap-2"
             >
               <span>Open in Template Editor</span>
               <span>→</span>
-            </button>
+            </a>
             <button
               onClick={() => { setStatus('idle'); setResult(null); }}
               className="w-full py-2 text-xs font-medium text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 transition-colors"

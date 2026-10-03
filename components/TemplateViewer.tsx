@@ -293,15 +293,13 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
               <span>Export (.xlsx)</span>
             </a>
 
-            {isSeed ? (
-              <button
-                onClick={duplicateTemplate}
-                disabled={duplicating}
-                className="px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 rounded-xl shadow-xs shadow-amber-500/20 disabled:opacity-50 transition-all duration-150 btn-press flex items-center gap-1.5"
-              >
-                <span>{duplicating ? 'Duplicating…' : '⊕ Copy to Edit'}</span>
-              </button>
-            ) : null}
+            <button
+              onClick={duplicateTemplate}
+              disabled={duplicating}
+              className="px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 rounded-xl shadow-xs shadow-amber-500/20 disabled:opacity-50 transition-all duration-150 btn-press flex items-center gap-1.5"
+            >
+              <span>{duplicating ? 'Duplicating…' : (isSeed ? '⊕ Copy to Edit' : '⊕ Duplicate Template')}</span>
+            </button>
           </div>
         </div>
 
@@ -629,7 +627,7 @@ export default function TemplateViewer({ templateId, templateName, isSeed, field
                                 </div>
 
                                 {!isSeed && (
-                                  <div className="flex items-center gap-1 opacity-80 sm:opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <div className="flex items-center gap-1 opacity-100 transition-opacity">
                                     {isModified && (
                                       <button
                                         onClick={() => revertField(field)}
