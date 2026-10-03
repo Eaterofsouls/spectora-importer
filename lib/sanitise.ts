@@ -31,12 +31,47 @@ const ALLOWED_TAGS = [
 
 const ALLOWED_SCHEMES = ["https", "http", "mailto"];
 
+const PRIVATE_IP_PATTERNS = [
+  /^localhost$/i,
+  /^127\.\d+\.\d+\.\d+$/,
+  /^10\.\d+\.\d+\.\d+$/,
+  /^172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+$/,
+  /^192\.168\.\d+\.\d+$/,
+  /^169\.254\.\d+\.\d+$/, // Cloud metadata (AWS, GCP, Azure)
+  /^0\.0\.0\.0$/,
+  /^::1$/,
+  /^fd[0-9a-f]{2}:/i,
+];
+
+/**
+ * Validates external media/photo URLs against SSRF, internal network probing, and malicious schemes.
+ */
+export function isSafeMediaUrl(urlString: string): boolean {
+  if (!urlString || typeof urlString !== "string") return false;
+  try {
+    const trimmed = urlString.trim();
+    if (trimmed.startsWith("data:image/")) {
+      return /^data:image\/(png|jpe?g|gif|webp|bmp);base64,[a-z0-9+/=]+$/i.test(trimmed);
+    }
+    const url = new URL(trimmed);
+    if (url.protocol !== "https:") return false;
+    if (url.username || url.password) return false;
+    const hostname = url.hostname.toLowerCase();
+    for (const pattern of PRIVATE_IP_PATTERNS) {
+      if (pattern.test(hostname)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const SANITISE_OPTIONS: sanitizeHtml.IOptions = {
   allowedTags: ALLOWED_TAGS,
   allowedAttributes: {
     "*": ["class", "style"],
     "a": ["href", "target", "rel", "title"],
-    "img": ["src", "alt", "width", "height"],
+    "img": ["src", "alt", "width", "height", "loading", "referrerpolicy"],
     "table": ["cellpadding", "cellspacing", "border"],
     "td": ["colspan", "rowspan"],
     "th": ["colspan", "rowspan"],
@@ -58,7 +93,7 @@ const SANITISE_OPTIONS: sanitizeHtml.IOptions = {
     },
   },
   allowedSchemes: ALLOWED_SCHEMES,
-  // Force all links to open safely
+  // Force all links and media to open safely
   transformTags: {
     a: (tagName, attribs) => ({
       tagName,
@@ -68,6 +103,20 @@ const SANITISE_OPTIONS: sanitizeHtml.IOptions = {
         target: attribs.target ?? "_blank",
       },
     }),
+    img: (tagName, attribs): sanitizeHtml.Tag => {
+      const src = attribs.src ?? "";
+      if (!isSafeMediaUrl(src)) {
+        return { tagName: "span", attribs: { class: "text-xs italic text-gray-400" }, text: "[filtered media]" };
+      }
+      return {
+        tagName,
+        attribs: {
+          ...attribs,
+          loading: "lazy",
+          referrerpolicy: "no-referrer",
+        },
+      };
+    },
     // Restrict iframe src to YouTube/Vimeo only
     iframe: (tagName, attribs) => {
       const src = attribs.src ?? "";

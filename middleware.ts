@@ -41,11 +41,15 @@ export async function middleware(req: NextRequest) {
   const { data: { session } } = await supabase.auth.getSession();
 
   if (!session) {
-    // Sign in to reviewer session seamlessly (zero friction for reviewers)
-    await supabase.auth.signInWithPassword({
-      email: "reviewer@hiveinspect.com",
-      password: "HiveInspect2026!",
-    });
+    // Attempt isolated anonymous session for per-user tenancy
+    const { error: anonError } = await supabase.auth.signInAnonymously();
+    if (anonError) {
+      // Fallback to reviewer session
+      await supabase.auth.signInWithPassword({
+        email: "reviewer@hiveinspect.com",
+        password: "HiveInspect2026!",
+      });
+    }
   }
 
   return res;

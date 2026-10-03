@@ -13,7 +13,7 @@
 
 import * as XLSX from "xlsx";
 import { parseSpectoraExport, decodeEntities } from "../lib/parser";
-import { sanitiseHtml } from "../lib/sanitise";
+import { sanitiseHtml, isSafeMediaUrl } from "../lib/sanitise";
 import { runColumnAudit } from "../lib/ai-auditor";
 
 const BASE_HEADERS = [
@@ -171,5 +171,40 @@ describe("Architectural Defenses & Forensic Regressions", () => {
     expect(audit.low_confidence_columns).toHaveLength(0);
     expect(audit.all_columns.every((c) => c.is_known)).toBe(true);
     expect(audit.all_columns.every((c) => c.confidence === 1.0)).toBe(true);
+  });
+
+  test("SSRF protection blocks cloud metadata, loopback, private IPs and non-HTTPS media", () => {
+    // Cloud metadata (AWS, GCP, Azure IMDS)
+    expect(isSafeMediaUrl("http://169.254.169.254/latest/meta-data/")).toBe(false);
+    expect(isSafeMediaUrl("https://169.254.169.254/secret")).toBe(false);
+
+    // Loopback & local network
+    expect(isSafeMediaUrl("http://127.0.0.1:8080/admin")).toBe(false);
+    expect(isSafeMediaUrl("http://localhost:3000")).toBe(false);
+    expect(isSafeMediaUrl("https://192.168.1.1/router")).toBe(false);
+    expect(isSafeMediaUrl("https://10.0.0.5/api")).toBe(false);
+
+    // Credential leakage in URL
+    expect(isSafeMediaUrl("https://user:pass@example.com/photo.jpg")).toBe(false);
+
+    // Valid public HTTPS images
+    expect(isSafeMediaUrl("https://cdn.spectora.com/photos/123.jpg")).toBe(true);
+    expect(isSafeMediaUrl("https://images.unsplash.com/photo-1.png")).toBe(true);
+
+    // Safe Base64 image
+    expect(isSafeMediaUrl("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")).toBe(true);
+  });
+
+  test("Sanitizer filters dangerous image sources and applies no-referrer", () => {
+    const maliciousImg = '<img src="http://169.254.169.254/latest/meta-data/" alt="probe">';
+    const cleanMalicious = sanitiseHtml(maliciousImg);
+    expect(cleanMalicious).not.toContain("169.254.169.254");
+    expect(cleanMalicious).toContain("[filtered media]");
+
+    const safeImg = '<img src="https://cdn.spectora.com/photos/roof.jpg" alt="Roof">';
+    const cleanSafe = sanitiseHtml(safeImg);
+    expect(cleanSafe).toContain('src="https://cdn.spectora.com/photos/roof.jpg"');
+    expect(cleanSafe).toContain('referrerpolicy="no-referrer"');
+    expect(cleanSafe).toContain('loading="lazy"');
   });
 });

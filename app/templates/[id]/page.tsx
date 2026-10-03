@@ -2,6 +2,8 @@ import { notFound } from 'next/navigation';
 import { createSupabaseServiceClient } from '@/lib/supabase';
 import TemplateViewer from '@/components/TemplateViewer';
 
+export const dynamic = 'force-dynamic';
+
 interface Props {
   params: Promise<{ id: string }>;
 }
@@ -46,40 +48,70 @@ export default async function TemplatePage({ params }: Props) {
   const verifyIssues = issues?.filter(i => i.severity === 'verify') ?? [];
 
   return (
-    <main className="min-h-screen bg-gray-50 dark:bg-gray-950">
-      <header className="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-6 py-4">
-        <div className="max-w-5xl mx-auto flex items-center justify-between gap-4">
-          <a href="/" className="text-sm text-blue-600 dark:text-blue-400 hover:underline">
-            ← Back
-          </a>
-          <div className="flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
-            Imported from <code className="text-xs bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">{template.source_file}</code>
+    <main className="min-h-screen bg-slate-50/80 dark:bg-slate-950 text-slate-900 dark:text-slate-100 antialiased selection:bg-amber-100 selection:text-amber-900">
+      {/* Top Navbar */}
+      <header className="sticky top-0 z-40 backdrop-blur-md bg-white/80 dark:bg-slate-900/80 border-b border-slate-200/80 dark:border-slate-800/80">
+        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <a
+              href="/templates"
+              className="text-xs font-semibold px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-amber-50 hover:text-amber-700 dark:hover:bg-amber-950/40 dark:hover:text-amber-300 transition-colors btn-press flex items-center gap-1.5"
+            >
+              <span>←</span>
+              <span>All Templates</span>
+            </a>
+            <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-slate-900 dark:text-white text-sm truncate max-w-xs sm:max-w-md">
+                {template.name}
+              </span>
+              {template.is_seed ? (
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200/70 dark:border-amber-800/60">
+                  Seed Template
+                </span>
+              ) : (
+                <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200/70 dark:border-emerald-800/60">
+                  Imported
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400 font-mono">
+            <span>Source:</span>
+            <span className="text-slate-600 dark:text-slate-300 truncate max-w-[180px]">
+              {template.source_file}
+            </span>
           </div>
         </div>
       </header>
 
-      <div className="max-w-5xl mx-auto px-6 py-8">
-        {/* Import report banner */}
+      {/* Main Content with Negative Space */}
+      <div className="max-w-6xl mx-auto px-6 py-10 space-y-6">
+        {/* Verification & Issues Alert */}
         {(errorCount > 0 || warnCount > 0 || verifyIssues.length > 0) && (
-          <div className="mb-6 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-4">
-            <h3 className="font-medium text-amber-800 dark:text-amber-300 text-sm mb-2">Import report</h3>
-            <div className="flex gap-4 text-sm">
-              {errorCount > 0 && (
-                <span className="text-red-600 dark:text-red-400">🔴 {errorCount} error{errorCount !== 1 ? 's' : ''}</span>
-              )}
-              {warnCount > 0 && (
-                <span className="text-amber-600 dark:text-amber-400">🟡 {warnCount} warning{warnCount !== 1 ? 's' : ''}</span>
-              )}
-              {verifyIssues.length > 0 && (
-                <span className="text-purple-600 dark:text-purple-400">
-                  ⚠️ {verifyIssues.length} verification issue{verifyIssues.length !== 1 ? 's' : ''}
-                </span>
-              )}
+          <div className="rounded-2xl border border-amber-200/80 dark:border-amber-800/60 bg-amber-50/50 dark:bg-amber-950/20 p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-amber-900 dark:text-amber-200 text-sm flex items-center gap-2">
+                <span>📋</span>
+                <span>Fidelity Audit Report</span>
+              </h3>
+              <div className="flex gap-2">
+                {errorCount > 0 && (
+                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 dark:bg-rose-900/50 dark:text-rose-200">
+                    {errorCount} error{errorCount !== 1 ? 's' : ''}
+                  </span>
+                )}
+                {warnCount > 0 && (
+                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200">
+                    {warnCount} notice{warnCount !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
             </div>
             {verifyIssues.length > 0 && (
-              <p className="text-xs text-amber-700 dark:text-amber-400 mt-2">
-                Verification mismatches detected — the DB write path check found inconsistencies.
-                This is unexpected and should be reported.
+              <p className="text-xs text-amber-800 dark:text-amber-300">
+                Verification checks detected {verifyIssues.length} mismatch(es) against source data.
               </p>
             )}
           </div>
