@@ -2,7 +2,7 @@
  * tests/ai-auditor.test.ts
  *
  * Tests for the AI column confidence auditor failure modes.
- * Per brief: "we want to see your thinking around model failure modes."
+ * Validates resilience and deterministic fallback across all model failure modes.
  *
  * All tests mock the fetch() call — we never make real API calls in tests.
  * This proves the validation seam works correctly regardless of AI behaviour.

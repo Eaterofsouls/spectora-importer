@@ -9,7 +9,7 @@
  * - Returns a strict typed schema — validated before any action
  * - Deterministic parse ALWAYS wins; AI only surfaces low-confidence columns
  * - If AI fails (timeout, bad JSON, hallucinated keys) → fall back silently
- *   and log the failure mode — this is what the brief asks us to demonstrate
+ *   and log the failure mode to maintain zero-loss determinism
  *
  * Failure modes tested:
  * 1. Non-JSON response → ParseError caught, fallback used
