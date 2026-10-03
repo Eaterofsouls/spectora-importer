@@ -6,7 +6,7 @@
 [![Methodology](https://img.shields.io/badge/architecture-Meridian%20Framework-blue)](./ARCHITECTURE.md)
 [![Integrity](https://img.shields.io/badge/verification-pre--commit%20rollback-amber)](./ARCHITECTURE.md#phase-3-failure-cartography)
 
-**Live Demo:** [spectora-importer.vercel.app](https://spectora-importer.vercel.app) *(Pre-seeded with InterNACHI Residential Master Template)*
+**Live Demo:** [spectora-importer-plum.vercel.app](https://spectora-importer-plum.vercel.app) *(Pre-seeded with InterNACHI Residential Master Template)*
 
 ---
 
